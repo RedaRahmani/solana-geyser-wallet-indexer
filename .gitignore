@@ -1,0 +1,5 @@
+/target
+/test-ledger/
+# Logs (validator.log etc.)
+*.log
+test-ledger/*.log
