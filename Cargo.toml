@@ -12,3 +12,6 @@ log = "0.4"
 env_logger = "0.11"
 agave-geyser-plugin-interface = "3.0.10"
 bs58 = "0.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+anyhow = "1.0.100"
