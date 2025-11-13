@@ -1,4 +1,8 @@
 {
   "libpath": "/home/reda-37/solana-geyser-wallet-indexer/target/release/libsolana_geyser_wallet_indexer.so",
-  "params": {"target_wallet": "24fNhvsvex2KNx3CgspSi3b1rvvdQRGEnqHxKVPb24kX"}
+  "params": {
+    "target_wallet": "24fNhvsvex2KNx3CgspSi3b1rvvdQRGEnqHxKVPb24kX",
+    "nats_url": "nats://127.0.0.1:4222",
+    "nats_subject": "WALLET.updates"
+  }
 }

@@ -11,7 +11,12 @@ use agave_geyser_plugin_interface::geyser_plugin_interface::{
     SlotStatus,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+// global, lazily-initialized NATS connection & subject
+static NATS: OnceLock<nats::Connection> = OnceLock::new();
+static SUBJECT: OnceLock<String> = OnceLock::new();
 
 #[derive(Deserialize)]
 struct ConfigRoot {
@@ -26,6 +31,10 @@ struct ConfigRoot {
 struct Params {
     #[serde(default)]
     target_wallet: Option<String>,
+     #[serde(default)]
+    nats_url: Option<String>,
+    #[serde(default)]
+    nats_subject: Option<String>,
 }
 
 // #[derive(Debug)]
@@ -35,6 +44,24 @@ struct Params {
 pub struct LoggerPlugin {
     target_wallet: Option<[u8; 32]>,
 }
+
+#[derive(Serialize)]
+    struct Row<'a> {
+        // using string ts keeps ClickHouse HTTP insert simple (JSONEachRow)
+        ts: String,      // RFC3339 (UTC)
+        slot: u64,
+        write_ver: u64,
+        pubkey: &'a str, // base58 string
+        lamports: u128,
+    }
+
+    #[inline]
+    fn nats_publish(bytes: &[u8]) {
+        if let Some(nc) = NATS.get() {
+            // ignore publish errors so we don't break the validator
+            let _ = nc.publish(SUBJECT.get().map(|s| s.as_str()).unwrap_or("WALLET.updates"), bytes);
+        }
+    }
 
 impl LoggerPlugin {
     pub fn new() -> Self {
@@ -63,12 +90,25 @@ impl LoggerPlugin {
             .with_context(|| "Invalid geyser config JSON")?;
 
         let params = cfg.params.or(cfg.args).unwrap_or_default();
+
         if let Some(s) = params.target_wallet {
             self.set_target_wallet_from_b58(&s)?;
             eprintln!("[PLUGIN] target_wallet set to {s}");
         } else {
             eprintln!("[PLUGIN] WARNING: no target_wallet in config; emitting all accounts");
         }
+
+        // NATS
+        let nats_url = params.nats_url.as_deref().unwrap_or("nats://127.0.0.1:4222");
+        let subj = params.nats_subject.clone().unwrap_or_else(|| "WALLET.updates".to_string());
+
+        if NATS.get().is_none() {
+            let conn = nats::connect(nats_url)
+                .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
+            let _ = NATS.set(conn);
+            eprintln!("[PLUGIN] connected to NATS at {nats_url}");
+        }
+        let _ = SUBJECT.set(subj);
         Ok(())
     }
 
@@ -79,6 +119,8 @@ impl LoggerPlugin {
             None => true, // if no target configured, pass through
         }
     }
+
+    
 }
 
 
@@ -145,26 +187,73 @@ impl GeyserPlugin for LoggerPlugin {
 
          match account {
         ReplicaAccountInfoVersions::V0_0_1(info) => {
-                let key: &[u8] = info.pubkey;
-                if !self.matches_target(key) { return Ok(()); }
-                let pubkey_str = bs58::encode(key).into_string();
-                eprintln!("[GEYSER-WALLET-ACCOUNT] v0.0.1: slot={slot}, pubkey={pubkey_str}, lamports={}", info.lamports);
-            }
-            ReplicaAccountInfoVersions::V0_0_2(info) => {
-                let key: &[u8] = info.pubkey;
-                if !self.matches_target(key) { return Ok(()); }
-                let pubkey_str = bs58::encode(key).into_string();
-                eprintln!("[GEYSER-WALLET-ACCOUNT] v0.0.2: slot={slot}, pubkey={pubkey_str}, lamports={}, write_version={}, has_sig={}",
-                    info.lamports, info.write_version, info.txn_signature.is_some());
-            }
-            ReplicaAccountInfoVersions::V0_0_3(info) => {
-                let key: &[u8] = info.pubkey;
-                if !self.matches_target(key) { return Ok(()); }
-                let pubkey_str = bs58::encode(key).into_string();
-                eprintln!("[GEYSER-WALLET-ACCOUNT] v0.0.3: slot={slot}, pubkey={pubkey_str}, lamports={}, write_version={}",
-                    info.lamports, info.write_version);
+            let key: &[u8] = info.pubkey;
+            if !self.matches_target(key) { return Ok(()); }
+            let pubkey_str = bs58::encode(key).into_string();
+            eprintln!("[GEYSER-WALLET-ACCOUNT] v0.0.1: slot={slot}, pubkey={pubkey_str}, lamports={}", info.lamports);
+
+            // build & publish row (write_ver not available in v0.0.1 → use 0)
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+// e.g. "2025-11-13 22:15:33"
+
+            let row = Row {
+                ts: now,
+                slot,
+                write_ver: 0,
+                pubkey: &pubkey_str,
+                lamports: info.lamports as u128,
+            };
+            if let Ok(json) = serde_json::to_vec(&row) {
+                nats_publish(&json);
             }
         }
+        ReplicaAccountInfoVersions::V0_0_2(info) => {
+            let key: &[u8] = info.pubkey;
+            if !self.matches_target(key) { return Ok(()); }
+            let pubkey_str = bs58::encode(key).into_string();
+            eprintln!(
+                "[GEYSER-WALLET-ACCOUNT] v0.0.2: slot={slot}, pubkey={pubkey_str}, lamports={}, write_version={}, has_sig={}",
+                info.lamports, info.write_version, info.txn_signature.is_some()
+            );
+
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+// e.g. "2025-11-13 22:15:33"
+
+            let row = Row {
+                ts: now,
+                slot,
+                write_ver: info.write_version as u64,
+                pubkey: &pubkey_str,
+                lamports: info.lamports as u128,
+            };
+            if let Ok(json) = serde_json::to_vec(&row) {
+                nats_publish(&json);
+            }
+        }
+        ReplicaAccountInfoVersions::V0_0_3(info) => {
+            let key: &[u8] = info.pubkey;
+            if !self.matches_target(key) { return Ok(()); }
+            let pubkey_str = bs58::encode(key).into_string();
+            eprintln!(
+                "[GEYSER-WALLET-ACCOUNT] v0.0.3: slot={slot}, pubkey={pubkey_str}, lamports={}, write_version={}",
+                info.lamports, info.write_version
+            );
+
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+// e.g. "2025-11-13 22:15:33"
+
+            let row = Row {
+                ts: now,
+                slot,
+                write_ver: info.write_version as u64,
+                pubkey: &pubkey_str,
+                lamports: info.lamports as u128,
+            };
+            if let Ok(json) = serde_json::to_vec(&row) {
+                nats_publish(&json);
+            }
+        }}
+
         Ok(())
     }
 
