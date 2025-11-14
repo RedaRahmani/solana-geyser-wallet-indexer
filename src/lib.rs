@@ -58,10 +58,17 @@ pub struct LoggerPlugin {
     #[inline]
     fn nats_publish(bytes: &[u8]) {
         if let Some(nc) = NATS.get() {
-            // ignore publish errors so we don't break the validator
-            let _ = nc.publish(SUBJECT.get().map(|s| s.as_str()).unwrap_or("WALLET.updates"), bytes);
+            let subj = SUBJECT.get().map(|s| s.as_str()).unwrap_or("WALLET.updates");
+            if let Err(e) = nc.publish(subj, bytes) {
+                eprintln!("[PLUGIN] NATS publish error on {subj}: {e}");
+            } else {
+                eprintln!("[PLUGIN] NATS publish OK on {subj}");
+            }
+        } else {
+            eprintln!("[PLUGIN] NATS connection not initialized, skipping publish");
         }
     }
+
 
 impl LoggerPlugin {
     pub fn new() -> Self {
@@ -84,33 +91,37 @@ impl LoggerPlugin {
     }
 
     fn load_target_from_config(&mut self, path: &str) -> Result<()> {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("Cannot read config file: {path}"))?;
-        let cfg: ConfigRoot = serde_json::from_str(&raw)
-            .with_context(|| "Invalid geyser config JSON")?;
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("Cannot read config file: {path}"))?;
+    let cfg: ConfigRoot = serde_json::from_str(&raw)
+        .with_context(|| "Invalid geyser config JSON")?;
 
-        let params = cfg.params.or(cfg.args).unwrap_or_default();
+    let params = cfg.params.or(cfg.args).unwrap_or_default();
 
-        if let Some(s) = params.target_wallet {
-            self.set_target_wallet_from_b58(&s)?;
-            eprintln!("[PLUGIN] target_wallet set to {s}");
-        } else {
-            eprintln!("[PLUGIN] WARNING: no target_wallet in config; emitting all accounts");
-        }
-
-        // NATS
-        let nats_url = params.nats_url.as_deref().unwrap_or("nats://127.0.0.1:4222");
-        let subj = params.nats_subject.clone().unwrap_or_else(|| "WALLET.updates".to_string());
-
-        if NATS.get().is_none() {
-            let conn = nats::connect(nats_url)
-                .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
-            let _ = NATS.set(conn);
-            eprintln!("[PLUGIN] connected to NATS at {nats_url}");
-        }
-        let _ = SUBJECT.set(subj);
-        Ok(())
+    if let Some(s) = params.target_wallet {
+        self.set_target_wallet_from_b58(&s)?;
+        eprintln!("[PLUGIN] target_wallet set to {s}");
+    } else {
+        eprintln!("[PLUGIN] WARNING: no target_wallet in config; emitting all accounts");
     }
+
+    // NATS
+    let nats_url = params.nats_url.as_deref().unwrap_or("nats://127.0.0.1:4222");
+    let subj = params.nats_subject.clone().unwrap_or_else(|| "WALLET.updates".to_string());
+
+    eprintln!("[PLUGIN] NATS URL from config = {nats_url}");
+    eprintln!("[PLUGIN] NATS SUBJECT from config = {subj}");
+
+    if NATS.get().is_none() {
+        let conn = nats::connect(nats_url)
+            .with_context(|| format!("Failed to connect to NATS at {nats_url}"))?;
+        let _ = NATS.set(conn);
+        eprintln!("[PLUGIN] connected to NATS at {nats_url}");
+    }
+    let _ = SUBJECT.set(subj);
+    Ok(())
+}
+
 
     #[inline]
     fn matches_target(&self, key: &[u8]) -> bool {

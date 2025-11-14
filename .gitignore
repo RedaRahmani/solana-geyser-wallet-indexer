@@ -3,5 +3,5 @@
 # Logs (validator.log etc.)
 *.log
 test-ledger/*.log
-/clickhouse_ingestor
 sender.json
+clickhouse_ingestor/target
